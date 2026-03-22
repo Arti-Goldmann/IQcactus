@@ -5,7 +5,7 @@
       "Application": "Pcbnew",
       "Version": "9.0.7"
     },
-    "CreationDate": "2026-01-25T16:38:02+03:00"
+    "CreationDate": "2026-03-22T18:19:07+03:00"
   },
   "GeneralSpecs": {
     "ProjectId": {
@@ -14,8 +14,8 @@
       "Revision": "rev?"
     },
     "Size": {
-      "X": 133.05,
-      "Y": 93.05
+      "X": 126.05,
+      "Y": 83.05
     },
     "LayerNumber": 2,
     "BoardThickness": 1.6,
@@ -27,7 +27,7 @@
       "PadToPad": 0.2,
       "PadToTrack": 0.2,
       "TrackToTrack": 0.2,
-      "MinLineWidth": 0.2,
+      "MinLineWidth": 0.5,
       "TrackToRegion": 0.5,
       "RegionToRegion": 0.5
     }
@@ -41,16 +41,6 @@
     {
       "Path": "cactus_plate-B_Cu.gbr",
       "FileFunction": "Copper,L2,Bot",
-      "FilePolarity": "Positive"
-    },
-    {
-      "Path": "cactus_plate-F_Paste.gbr",
-      "FileFunction": "SolderPaste,Top",
-      "FilePolarity": "Positive"
-    },
-    {
-      "Path": "cactus_plate-B_Paste.gbr",
-      "FileFunction": "SolderPaste,Bot",
       "FilePolarity": "Positive"
     },
     {
