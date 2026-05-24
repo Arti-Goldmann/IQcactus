@@ -30,8 +30,8 @@
 
 #define TAG        "server"
 #define RESP_BUF   512
-#define LIGHT_GPIO 26
-#define PUMP_GPIO  25
+#define LIGHT_GPIO 25
+#define PUMP_GPIO  26
 
 static char resp_buf[RESP_BUF];
 static int  resp_len;
@@ -54,9 +54,18 @@ static void apply_response(const char *json)
     cJSON *root = cJSON_ParseWithLength(json, resp_len);
     if (!root) return;
 
-    STATE_LOCK();
-
+    // Разбор JSON без лока — cJSON работает только со своим деревом.
     cJSON *v;
+    cJSON *cmd_light = cJSON_GetObjectItem(root, "cmd_light");
+    cJSON *cmd_pump  = cJSON_GetObjectItem(root, "cmd_pump");
+
+    bool have_light = cmd_light && cJSON_IsString(cmd_light);
+    bool have_pump  = cmd_pump  && cJSON_IsString(cmd_pump);
+    bool light_on   = have_light && strcmp(cmd_light->valuestring, "on") == 0;
+    bool pump_on    = have_pump  && strcmp(cmd_pump->valuestring,  "on") == 0;
+
+    // Все изменения g_state — под одним локом, без I/O внутри.
+    STATE_LOCK();
     if ((v = cJSON_GetObjectItem(root, "watering_mode")) && cJSON_IsNumber(v))
         g_state.watering_mode = v->valueint;
     if ((v = cJSON_GetObjectItem(root, "water_interval_h")) && cJSON_IsNumber(v))
@@ -65,28 +74,25 @@ static void apply_response(const char *json)
         g_state.water_threshold_pct = v->valueint;
     if ((v = cJSON_GetObjectItem(root, "pump_duration_s")) && cJSON_IsNumber(v))
         g_state.pump_duration_s = v->valueint;
-
-    cJSON *cmd_light = cJSON_GetObjectItem(root, "cmd_light");
-    if (cmd_light && cJSON_IsString(cmd_light)) {
-        bool on = strcmp(cmd_light->valuestring, "on") == 0;
-        g_state.light_on = on;
-        STATE_UNLOCK();
-        gpio_set_level(LIGHT_GPIO, on ? 1 : 0);
-        ESP_LOGI(TAG, "cmd_light: %s", on ? "on" : "off");
-        STATE_LOCK();
+    if (have_light) g_state.light_on = light_on;
+    if (have_pump) {
+        g_state.pump_on = pump_on;
+        g_state.pump_stop_at = pump_on
+            ? (int64_t)time(NULL) + g_state.pump_duration_s
+            : 0;
     }
-
-    cJSON *cmd_pump = cJSON_GetObjectItem(root, "cmd_pump");
-    if (cmd_pump && cJSON_IsString(cmd_pump)) {
-        bool on = strcmp(cmd_pump->valuestring, "on") == 0;
-        g_state.pump_on = on;
-        STATE_UNLOCK();
-        gpio_set_level(PUMP_GPIO, on ? 1 : 0);
-        ESP_LOGI(TAG, "cmd_pump: %s", on ? "on" : "off");
-        STATE_LOCK();
-    }
-
     STATE_UNLOCK();
+
+    // GPIO и логи — после освобождения мьютекса.
+    if (have_light) {
+        gpio_set_level(LIGHT_GPIO, light_on ? 1 : 0);
+        ESP_LOGI(TAG, "cmd_light: %s", light_on ? "on" : "off");
+    }
+    if (have_pump) {
+        gpio_set_level(PUMP_GPIO, pump_on ? 1 : 0);
+        ESP_LOGI(TAG, "cmd_pump: %s", pump_on ? "on" : "off");
+    }
+
     cJSON_Delete(root);
 }
 
@@ -132,16 +138,22 @@ void server_task(void *arg)
         memset(resp_buf, 0, sizeof(resp_buf));
         esp_http_client_set_post_field(client, body, strlen(body));
 
+        TickType_t t0 = xTaskGetTickCount();
         esp_err_t err = esp_http_client_perform(client);
+        uint32_t dt_ms = (xTaskGetTickCount() - t0) * portTICK_PERIOD_MS;
+
         if (err == ESP_OK) {
             int status = esp_http_client_get_status_code(client);
             if (status == 200 && resp_len > 0) {
                 resp_buf[resp_len] = '\0';
                 apply_response(resp_buf);
             }
-            ESP_LOGD(TAG, "POST %d hum=%d light=%d pump=%d", status, hum, light, pump);
+            // Сигналим в лог только если запрос подозрительно долгий — обычно молчим.
+            if (dt_ms > 1000) {
+                ESP_LOGW(TAG, "POST slow: %lu ms status=%d", (unsigned long)dt_ms, status);
+            }
         } else {
-            ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "POST failed in %lu ms: %s", (unsigned long)dt_ms, esp_err_to_name(err));
             // Принудительно закрыть соединение — при следующем вызове
             // perform() переподключится с новым TLS-хендшейком.
             esp_http_client_close(client);

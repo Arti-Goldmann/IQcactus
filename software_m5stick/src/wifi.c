@@ -71,6 +71,11 @@ bool wifi_connect(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Полностью отключаем Wi-Fi power save. Modem sleep вводил CPU в light-sleep
+    // ~80% времени, после чего SPI-периферия LCD теряла завершение DMA-транзакции
+    // и esp_lcd_panel_draw_bitmap зависал на семафоре навсегда.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
     EventBits_t bits = xEventGroupWaitBits(wifi_events,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
         pdMS_TO_TICKS(15000));

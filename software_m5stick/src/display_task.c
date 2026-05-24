@@ -3,12 +3,22 @@
 #include "graphics.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
 
 #define TAG_DISP "display"
+
+// Маркер последней пройденной точки внутри цикла display_task.
+// Если задача зависнет, отдельный watchdog-таск увидит, что счётчик кадров
+// не растёт, и распечатает последний stage — это покажет, где именно встали.
+static volatile uint32_t g_disp_frame = 0;
+static volatile uint8_t  g_disp_stage = 0;
+static TaskHandle_t      g_disp_handle = NULL;
+#define STAGE(n)  do { g_disp_stage = (n); } while (0)
 
 #include "sprites/sprite_kaktus_daytime1.h"
 #include "sprites/sprite_kaktus_daytime2.h"
@@ -70,7 +80,7 @@ static void draw_sprite(const Sprite *s)
 //
 // Layout (scale=2, каждый символ 12×14px):
 //   x=4,  y=4  → "12:34"         (время)
-//   x=121,y=4  → капля 14×14px   (правый верх)
+//   x=110,y=4  → капля 14×14px   (правый верх)
 //   x=83, y=20 → " 45%"          (под каплей, правый край = 83+48=131)
 static void draw_hud(bool night)
 {
@@ -107,11 +117,11 @@ static void draw_hud(bool night)
     // Иконка капли — только при смене режима
     if (mode_changed) {
         if (night) {
-            gfx_draw_rle_image(121, 4, RAINDROP_WIDTH, RAINDROP_HEIGHT,
+            gfx_draw_rle_image(110, 4, RAINDROP_WIDTH, RAINDROP_HEIGHT,
                                raindrop_night_rle_counts, raindrop_night_rle_colors,
                                RAINDROP_NIGHT_RLE_LEN);
         } else {
-            gfx_draw_rle_image(121, 4, RAINDROP_WIDTH, RAINDROP_HEIGHT,
+            gfx_draw_rle_image(110, 4, RAINDROP_WIDTH, RAINDROP_HEIGHT,
                                raindrop_rle_counts, raindrop_rle_colors,
                                RAINDROP_RLE_LEN);
         }
@@ -132,12 +142,92 @@ static void draw_hud(bool night)
     hud_init   = true;
 }
 
+// Фоновый watchdog: каждые 5 секунд проверяет, что display_task продвинулся
+// хотя бы на 1 кадр. Если нет — печатает stage, состояние декодера RLE,
+// счётчики gfx, кучу и stack water mark самой display_task.
+// Если задача застряла внутри SPI на 3 тика watchdog подряд (~15 с),
+// перезагружаемся — это последний рубеж против вечного зависания LCD-драйвера.
+#define DISPLAY_FREEZE_RESTART_TICKS 3
+
+static void display_watchdog_task(void *arg)
+{
+    uint32_t prev_frame = 0;
+    int      freeze_streak = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        uint32_t cur = g_disp_frame;
+        uint32_t calls = 0, errs = 0;
+        int last_err = 0;
+        gfx_get_stats(&calls, &errs, &last_err);
+
+        uint32_t bmp_in = 0, bmp_out = 0;
+        gfx_get_bmp_inflight(&bmp_in, &bmp_out);
+        bool inside_spi = (bmp_in != bmp_out);
+
+        uint32_t rle_in = 0, rle_out = 0;
+        int rle_row = 0, rle_px = 0, rle_ri = 0, rle_w = 0, rle_h = 0, rle_len = 0;
+        gfx_get_rle_state(&rle_in, &rle_out, &rle_row, &rle_px, &rle_ri,
+                          &rle_w, &rle_h, &rle_len);
+
+        unsigned long stk = g_disp_handle
+            ? (unsigned long)uxTaskGetStackHighWaterMark(g_disp_handle) : 0;
+
+        if (cur == prev_frame) {
+            freeze_streak++;
+            ESP_LOGE(TAG_DISP,
+                     "FREEZE[%d]: frame=%lu stage=%u stk=%lu | SPI%s in=%lu out=%lu"
+                     " | bmp calls=%lu errs=%lu last=%d"
+                     " | RLE in=%lu out=%lu row=%d/%d px=%d/%d ri=%d/%d"
+                     " | heap free=%lu min=%lu DMA=%lu",
+                     freeze_streak,
+                     (unsigned long)cur, (unsigned)g_disp_stage, stk,
+                     inside_spi ? "(INSIDE!)" : "",
+                     (unsigned long)bmp_in, (unsigned long)bmp_out,
+                     (unsigned long)calls, (unsigned long)errs, last_err,
+                     (unsigned long)rle_in, (unsigned long)rle_out,
+                     rle_row, rle_h, rle_px, rle_w, rle_ri, rle_len,
+                     (unsigned long)esp_get_free_heap_size(),
+                     (unsigned long)esp_get_minimum_free_heap_size(),
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+            if (freeze_streak >= DISPLAY_FREEZE_RESTART_TICKS) {
+                ESP_LOGE(TAG_DISP, "FREEZE persistent — restarting chip");
+                // Дать строке успеть улететь в UART
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
+        } else {
+            freeze_streak = 0;
+            ESP_LOGI(TAG_DISP,
+                     "alive: frame=%lu (+%lu) stage=%u stk=%lu | SPI in=%lu out=%lu"
+                     " | bmp calls=%lu errs=%lu | RLE in=%lu out=%lu"
+                     " | heap free=%lu DMA=%lu",
+                     (unsigned long)cur, (unsigned long)(cur - prev_frame),
+                     (unsigned)g_disp_stage, stk,
+                     (unsigned long)bmp_in, (unsigned long)bmp_out,
+                     (unsigned long)calls, (unsigned long)errs,
+                     (unsigned long)rle_in, (unsigned long)rle_out,
+                     (unsigned long)esp_get_free_heap_size(),
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA));
+        }
+        prev_frame = cur;
+    }
+}
+
 void display_task(void *arg)
 {
     int frame = 0;
-    int stk_log = 0;
+
+    g_disp_handle = xTaskGetCurrentTaskHandle();
+
+    // Поднимаем watchdog на низком приоритете и на ПРОТИВОПОЛОЖНОМ ядре
+    // (display_task пинуется на core 1), чтобы он всегда мог отчитаться,
+    // даже если ядро 1 целиком встало в SPI/DMA.
+    xTaskCreatePinnedToCore(display_watchdog_task, "disp_wdg", 3072, NULL, 2, NULL, 0);
 
     while (1) {
+        STAGE(1);
         bool light, pump;
         STATE_LOCK();
         light = g_state.light_on;
@@ -146,6 +236,7 @@ void display_task(void *arg)
 
         bool night = !light && !pump;
 
+        STAGE(2);
         if (pump) {
             draw_sprite(&raindrops[frame % 2]);
         } else if (light) {
@@ -154,14 +245,12 @@ void display_task(void *arg)
             draw_sprite(&nighttime[frame % 2]);
         }
 
+        STAGE(3);
         draw_hud(night);
-        frame++;
 
-        if (++stk_log >= 30) {
-            stk_log = 0;
-            ESP_LOGI(TAG_DISP, "stk=%lu words",
-                     (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-        }
+        STAGE(4);
+        frame++;
+        g_disp_frame = frame;
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

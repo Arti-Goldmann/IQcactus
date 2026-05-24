@@ -17,11 +17,14 @@ typedef struct {
     int  water_threshold_pct;   // порог влажности для режима 1
     int  pump_duration_s;       // длительность работы насоса, сек
     int64_t last_watered_s;     // unix timestamp последнего полива
+    int64_t pump_stop_at;       // unix timestamp автовыключения насоса (0 = не активен)
 } AppState;
 
 extern AppState g_state;
 extern SemaphoreHandle_t g_state_mutex;
 
-// Захватить мьютекс перед чтением/записью g_state (таймаут 100 мс)
-#define STATE_LOCK()   xSemaphoreTake(g_state_mutex, pdMS_TO_TICKS(100))
+// Захватить мьютекс перед чтением/записью g_state.
+// Критические секции тривиальны (несколько полей без I/O), поэтому ждём бесконечно —
+// это гарантирует, что STATE_UNLOCK всегда легален и состояние не читается без лока.
+#define STATE_LOCK()   xSemaphoreTake(g_state_mutex, portMAX_DELAY)
 #define STATE_UNLOCK() xSemaphoreGive(g_state_mutex)

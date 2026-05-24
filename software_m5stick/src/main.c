@@ -7,10 +7,6 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_vendor.h"
-#include "esp_lcd_panel_ops.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 #include "graphics.h"
@@ -37,8 +33,8 @@
 #define BTN_B_PIN   39   // BTN_B → насос (G25)
 
 // Выходы
-#define OUT_G26     26   // свет
-#define OUT_G25     25   // насос
+#define OUT_LIGHT   25   // свет
+#define OUT_PUMP    26   // насос
 
 // Датчик влажности (ADC1_CH4 = GPIO32)
 #define MOISTURE_ADC_CHANNEL  ADC_CHANNEL_4
@@ -57,7 +53,6 @@ void display_task(void *arg);
 void watering_task(void *arg);
 void server_task(void *arg);
 
-static esp_lcd_panel_handle_t panel_handle = NULL;
 static adc_oneshot_unit_handle_t adc1_handle = NULL;
 
 // Скользящее среднее ADC
@@ -66,51 +61,9 @@ static int moisture_sample_idx = 0;
 static int moisture_sample_sum = 0;
 static bool moisture_buf_ready = false;
 
-static void lcd_init(void)
-{
-    gpio_reset_pin(LCD_BL);
-    gpio_set_direction(LCD_BL, GPIO_MODE_OUTPUT);
-    gpio_set_level(LCD_BL, 1);
-
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = LCD_MOSI,
-        .miso_io_num = -1,
-        .sclk_io_num = LCD_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_WIDTH * LCD_HEIGHT * 2,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
-
-    esp_lcd_panel_io_handle_t io_handle = NULL;
-    esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num        = LCD_DC,
-        .cs_gpio_num        = LCD_CS,
-        .pclk_hz            = 40 * 1000 * 1000,
-        .lcd_cmd_bits       = 8,
-        .lcd_param_bits     = 8,
-        .spi_mode           = 0,
-        .trans_queue_depth  = 1,
-        .flags = { .dc_low_on_data = 0, .octal_mode = 0 },
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &io_handle));
-
-    esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = LCD_RST,
-        .rgb_endian     = LCD_RGB_ENDIAN_RGB,
-        .bits_per_pixel = 16,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle));
-
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 52, 40));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-
-    ESP_LOGI(TAG, "LCD %dx%d ok", LCD_WIDTH, LCD_HEIGHT);
-}
+// LCD-инициализация полностью делегирована в graphics.c (polling SPI ST7789).
+// esp_lcd_panel_io_spi умер: его DMA-completion IRQ периодически терялся,
+// и драйвер навсегда зависал на семафоре завершения транзакции.
 
 static int moisture_raw_to_percent(int raw)
 {
@@ -164,9 +117,9 @@ void app_main(void)
         .last_watered_s     = 0,
     };
 
-    // LCD
-    lcd_init();
-    gfx_init(panel_handle, LCD_WIDTH, LCD_HEIGHT);
+    // LCD (polling-SPI ST7789, без DMA-IRQ)
+    gfx_lcd_init(LCD_MOSI, LCD_CLK, LCD_CS, LCD_DC, LCD_RST, LCD_BL,
+                 LCD_WIDTH, LCD_HEIGHT, /*gap_x=*/52, /*gap_y=*/40);
     gfx_clear(COLOR_BLACK);
 
     // GPIO
@@ -176,13 +129,13 @@ void app_main(void)
     gpio_reset_pin(BTN_B_PIN);
     gpio_set_direction(BTN_B_PIN, GPIO_MODE_INPUT);
 
-    gpio_reset_pin(OUT_G26);
-    gpio_set_direction(OUT_G26, GPIO_MODE_OUTPUT);
-    gpio_set_level(OUT_G26, 0);
+    gpio_reset_pin(OUT_LIGHT);
+    gpio_set_direction(OUT_LIGHT, GPIO_MODE_OUTPUT);
+    gpio_set_level(OUT_LIGHT, 0);
 
-    gpio_reset_pin(OUT_G25);
-    gpio_set_direction(OUT_G25, GPIO_MODE_OUTPUT);
-    gpio_set_level(OUT_G25, 0);
+    gpio_reset_pin(OUT_PUMP);
+    gpio_set_direction(OUT_PUMP, GPIO_MODE_OUTPUT);
+    gpio_set_level(OUT_PUMP, 0);
 
     // ADC
     adc_oneshot_unit_init_cfg_t adc_unit_cfg = { .unit_id = ADC_UNIT_1 };
@@ -211,14 +164,18 @@ void app_main(void)
         ESP_LOGW(TAG, "Wi-Fi failed, continuing without time sync");
     }
 
-    // FreeRTOS задачи
-    xTaskCreate(display_task,   "display",   4096, NULL, 5, NULL);
-    xTaskCreate(watering_task,  "watering",  4096, NULL, 4, NULL);
-    xTaskCreate(server_task,    "server",    8192, NULL, 3, NULL);
+    // FreeRTOS задачи.
+    // display_task пинуем на APP_CPU (core 1), чтобы изолировать SPI-обмен
+    // от Wi-Fi/lwIP, которые крутятся на PRO_CPU (core 0).
+    // Без этого Wi-Fi-ISR периодически «съедал» завершение DMA-транзакции
+    // SPI, и esp_lcd_panel_draw_bitmap навсегда зависал на семафоре.
+    xTaskCreatePinnedToCore(display_task,  "display",  6144, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(server_task,   "server",   8192, NULL, 3, NULL, 0);
+    xTaskCreate            (watering_task, "watering", 4096, NULL, 4, NULL);
 
     // Главный цикл: кнопки + влажность
     int prev_btn_a = 1, prev_btn_b = 1;
-    int out_g26 = 0;
+    int out_light = 0;
     TickType_t last_a = 0, last_b = 0, last_moisture = 0;
     TickType_t pump_start_tick    = 0;
     TickType_t pump_duration_tick = 0;  // 0 = ручной таймер не активен
@@ -233,12 +190,12 @@ void app_main(void)
         if (prev_btn_a == 1 && btn_a == 0 &&
             (now - last_a) >= pdMS_TO_TICKS(DEBOUNCE_MS)) {
             last_a = now;
-            out_g26 = !out_g26;
-            gpio_set_level(OUT_G26, out_g26);
+            out_light = !out_light;
+            gpio_set_level(OUT_LIGHT, out_light);
             STATE_LOCK();
-            g_state.light_on = out_g26;
+            g_state.light_on = out_light;
             STATE_UNLOCK();
-            ESP_LOGI(TAG, "light: %d", out_g26);
+            ESP_LOGI(TAG, "light: %d", out_light);
         }
 
         // BTN_B → ручной полив: включить насос на pump_duration_s секунд
@@ -248,7 +205,7 @@ void app_main(void)
             STATE_LOCK();
             int dur = g_state.pump_duration_s;
             STATE_UNLOCK();
-            gpio_set_level(OUT_G25, 1);
+            gpio_set_level(OUT_PUMP, 1);
             pump_start_tick    = now;
             pump_duration_tick = pdMS_TO_TICKS((uint32_t)dur * 1000);
             STATE_LOCK();
@@ -261,7 +218,7 @@ void app_main(void)
         if (pump_duration_tick > 0 &&
             (now - pump_start_tick) >= pump_duration_tick) {
             pump_duration_tick = 0;
-            gpio_set_level(OUT_G25, 0);
+            gpio_set_level(OUT_PUMP, 0);
             STATE_LOCK();
             g_state.pump_on = false;
             g_state.pump_stop_at = 0;
@@ -274,7 +231,7 @@ void app_main(void)
         int64_t stop_at = g_state.pump_stop_at;
         STATE_UNLOCK();
         if (stop_at > 0 && (int64_t)time(NULL) >= stop_at) {
-            gpio_set_level(OUT_G25, 0);
+            gpio_set_level(OUT_PUMP, 0);
             STATE_LOCK();
             g_state.pump_on = false;
             g_state.pump_stop_at = 0;
