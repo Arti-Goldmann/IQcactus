@@ -9,6 +9,11 @@ static esp_lcd_panel_handle_t lcd_panel;
 static int lcd_width;
 static int lcd_height;
 
+static uint16_t *g_line_buf[2];
+static uint16_t *g_char_buf[2];
+static unsigned  g_line_idx = 0;
+static unsigned  g_char_idx = 0;
+
 // Простой шрифт 5x7 (ASCII 32-126)
 static const uint8_t font5x7[] = {
     0x00,0x00,0x00,0x00,0x00, // space
@@ -113,6 +118,10 @@ void gfx_init(esp_lcd_panel_handle_t panel, int width, int height)
     lcd_panel = panel;
     lcd_width = width;
     lcd_height = height;
+    for (int i = 0; i < 2; i++) {
+        g_line_buf[i] = heap_caps_malloc(width * sizeof(uint16_t), MALLOC_CAP_DMA);
+        g_char_buf[i] = heap_caps_malloc(5 * 4 * 7 * 4 * sizeof(uint16_t), MALLOC_CAP_DMA);
+    }
 }
 
 void gfx_draw_pixel(int x, int y, uint16_t color)
@@ -124,17 +133,15 @@ void gfx_draw_pixel(int x, int y, uint16_t color)
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t color)
 {
     if (x >= lcd_width || y >= lcd_height) return;
-    if (x + w > lcd_width) w = lcd_width - x;
+    if (x + w > lcd_width)  w = lcd_width - x;
     if (y + h > lcd_height) h = lcd_height - y;
-    
-    uint16_t *buf = heap_caps_malloc(w * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!buf) return;
-    
-    for (int i = 0; i < w; i++) buf[i] = color;
+
     for (int row = y; row < y + h; row++) {
+        uint16_t *buf = g_line_buf[g_line_idx & 1];
+        g_line_idx++;
+        for (int i = 0; i < w; i++) buf[i] = color;
         esp_lcd_panel_draw_bitmap(lcd_panel, x, row, x + w, row + 1, buf);
     }
-    free(buf);
 }
 
 void gfx_draw_rect(int x, int y, int w, int h, uint16_t color)
@@ -195,8 +202,8 @@ void gfx_draw_char_utf8(int x, int y, uint32_t codepoint, uint16_t color, uint16
     int pw = 5 * size;
     int ph = 7 * size;
 
-    uint16_t *buf = heap_caps_malloc(pw * ph * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!buf) return;
+    uint16_t *buf = g_char_buf[g_char_idx & 1];
+    g_char_idx++;
 
     for (int col = 0; col < 5; col++) {
         uint8_t bits = glyph[col];
@@ -210,8 +217,6 @@ void gfx_draw_char_utf8(int x, int y, uint32_t codepoint, uint16_t color, uint16
 
     if (x >= 0 && y >= 0 && x + pw <= lcd_width && y + ph <= lcd_height)
         esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + pw, y + ph, buf);
-
-    free(buf);
 }
 
 void gfx_draw_char(int x, int y, char c, uint16_t color, uint16_t bg, int size)
@@ -221,8 +226,8 @@ void gfx_draw_char(int x, int y, char c, uint16_t color, uint16_t bg, int size)
     int pw = 5 * size;
     int ph = 7 * size;
 
-    uint16_t *buf = heap_caps_malloc(pw * ph * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!buf) return;
+    uint16_t *buf = g_char_buf[g_char_idx & 1];
+    g_char_idx++;
 
     for (int col = 0; col < 5; col++) {
         uint8_t bits = glyph[col];
@@ -236,8 +241,6 @@ void gfx_draw_char(int x, int y, char c, uint16_t color, uint16_t bg, int size)
 
     if (x >= 0 && y >= 0 && x + pw <= lcd_width && y + ph <= lcd_height)
         esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + pw, y + ph, buf);
-
-    free(buf);
 }
 
 void gfx_draw_string(int x, int y, const char *str, uint16_t color, uint16_t bg, int size)
@@ -277,13 +280,12 @@ void gfx_draw_rle_image(int x, int y, int w, int h,
     int draw_w    = cx1 - cx0;
     int skip_top  = cy0 - y;
 
-    uint16_t *line = heap_caps_malloc(w * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!line) return;
-
     int px = 0, row = 0, ri = 0, rem = 0;
     uint16_t col = 0;
 
     while (row < h) {
+        uint16_t *line = g_line_buf[g_line_idx & 1];
+
         while (px < w) {
             if (rem == 0) {
                 if (ri >= rle_len) {
@@ -303,6 +305,7 @@ void gfx_draw_rle_image(int x, int y, int w, int h,
         if (row >= skip_top) {
             int screen_row = cy0 + (row - skip_top);
             if (screen_row >= cy1) break;
+            g_line_idx++;
             esp_lcd_panel_draw_bitmap(lcd_panel,
                 cx0, screen_row, cx0 + draw_w, screen_row + 1,
                 line + skip_left);
@@ -311,8 +314,6 @@ void gfx_draw_rle_image(int x, int y, int w, int h,
         row++;
         px = 0;
     }
-
-    free(line);
 }
 
 void gfx_clear(uint16_t color)

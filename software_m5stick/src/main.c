@@ -90,7 +90,7 @@ static void lcd_init(void)
         .lcd_cmd_bits       = 8,
         .lcd_param_bits     = 8,
         .spi_mode           = 0,
-        .trans_queue_depth  = 10,
+        .trans_queue_depth  = 1,
         .flags = { .dc_low_on_data = 0, .octal_mode = 0 },
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &io_handle));
@@ -257,15 +257,29 @@ void app_main(void)
             ESP_LOGI(TAG, "pump: manual start, %ds", dur);
         }
 
-        // Авто-остановка ручного полива по истечении таймера
+        // Авто-остановка ручного полива по истечении таймера (BTN_B)
         if (pump_duration_tick > 0 &&
             (now - pump_start_tick) >= pump_duration_tick) {
             pump_duration_tick = 0;
             gpio_set_level(OUT_G25, 0);
             STATE_LOCK();
             g_state.pump_on = false;
+            g_state.pump_stop_at = 0;
             STATE_UNLOCK();
-            ESP_LOGI(TAG, "pump: auto-stop");
+            ESP_LOGI(TAG, "pump: auto-stop (btn)");
+        }
+
+        // Авто-остановка насоса по команде сервера
+        STATE_LOCK();
+        int64_t stop_at = g_state.pump_stop_at;
+        STATE_UNLOCK();
+        if (stop_at > 0 && (int64_t)time(NULL) >= stop_at) {
+            gpio_set_level(OUT_G25, 0);
+            STATE_LOCK();
+            g_state.pump_on = false;
+            g_state.pump_stop_at = 0;
+            STATE_UNLOCK();
+            ESP_LOGI(TAG, "pump: auto-stop (server)");
         }
 
         prev_btn_a = btn_a;
