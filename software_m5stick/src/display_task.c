@@ -6,6 +6,9 @@
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
+#include "esp_log.h"
+
+#define TAG_DISP "display"
 
 #include "sprites/sprite_kaktus_daytime1.h"
 #include "sprites/sprite_kaktus_daytime2.h"
@@ -132,6 +135,7 @@ static void draw_hud(bool night)
 void display_task(void *arg)
 {
     int frame = 0;
+    int stk_log = 0;
 
     while (1) {
         bool light, pump;
@@ -152,6 +156,13 @@ void display_task(void *arg)
 
         draw_hud(night);
         frame++;
+
+        if (++stk_log >= 30) {
+            stk_log = 0;
+            ESP_LOGI(TAG_DISP, "stk=%lu words",
+                     (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+        }
+
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

@@ -12,7 +12,7 @@
 
 // Сервер (HTTPS). Пример: "https://192.168.1.100:8443/api/cactus"
 #define SERVER_URL    "https://example.com/api/cactus"
-#define SERVER_POLL_S 60    // период опроса, секунды
+#define SERVER_POLL_S 1     // период опроса, секунды
 
 // Уставки полива (переопределяются сервером)
 #define WATER_MODE         0   // 0 = по времени, 1 = по влажности

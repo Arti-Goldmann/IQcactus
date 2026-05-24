@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "cJSON.h"
 
@@ -94,15 +95,24 @@ void server_task(void *arg)
     char body[128];
 
     esp_http_client_config_t cfg = {
-        .url           = SERVER_URL,
-        .method        = HTTP_METHOD_POST,
-        .event_handler = http_event_handler,
-        .timeout_ms    = 10000,
-        .cert_pem      = SERVER_CERT_PEM,
+        .url                = SERVER_URL,
+        .method             = HTTP_METHOD_POST,
+        .event_handler      = http_event_handler,
+        .timeout_ms         = 5000,
+        .cert_pem           = SERVER_CERT_PEM,
+        .keep_alive_enable  = true,
     };
 
+    // Хендл создаётся один раз — TLS-сессия переиспользуется между запросами.
+    // При обрыве соединения esp_http_client_perform переподключается автоматически.
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    uint32_t poll_ms = (uint32_t)SERVER_POLL_S * 1000;
+    uint32_t log_counter = 0;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)SERVER_POLL_S * 1000));
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
 
         time_t now;
         time(&now);
@@ -120,23 +130,32 @@ void server_task(void *arg)
 
         resp_len = 0;
         memset(resp_buf, 0, sizeof(resp_buf));
-
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_post_field(client, body, strlen(body));
 
         esp_err_t err = esp_http_client_perform(client);
         if (err == ESP_OK) {
             int status = esp_http_client_get_status_code(client);
-            ESP_LOGI(TAG, "POST %d, body: %s", status, body);
             if (status == 200 && resp_len > 0) {
                 resp_buf[resp_len] = '\0';
                 apply_response(resp_buf);
             }
+            ESP_LOGD(TAG, "POST %d hum=%d light=%d pump=%d", status, hum, light, pump);
         } else {
             ESP_LOGW(TAG, "POST failed: %s", esp_err_to_name(err));
+            // Принудительно закрыть соединение — при следующем вызове
+            // perform() переподключится с новым TLS-хендшейком.
+            esp_http_client_close(client);
         }
 
-        esp_http_client_cleanup(client);
+        // Раз в 30 секунд выводим статистику ресурсов
+        log_counter += poll_ms;
+        if (log_counter >= 30000) {
+            log_counter = 0;
+            ESP_LOGI(TAG, "heap free=%lu min=%lu | DMA=%lu | stk=%lu words",
+                     (unsigned long)esp_get_free_heap_size(),
+                     (unsigned long)esp_get_minimum_free_heap_size(),
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+        }
     }
 }

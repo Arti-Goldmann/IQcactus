@@ -189,45 +189,55 @@ void gfx_fill_circle(int cx, int cy, int r, uint16_t color)
     }
 }
 
+void gfx_draw_char_utf8(int x, int y, uint32_t codepoint, uint16_t color, uint16_t bg, int size)
+{
+    const uint8_t *glyph = get_glyph(codepoint);
+    int pw = 5 * size;
+    int ph = 7 * size;
+
+    uint16_t *buf = heap_caps_malloc(pw * ph * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!buf) return;
+
+    for (int col = 0; col < 5; col++) {
+        uint8_t bits = glyph[col];
+        for (int row = 0; row < 7; row++) {
+            uint16_t pix = (bits & (1 << row)) ? color : bg;
+            for (int sy = 0; sy < size; sy++)
+                for (int sx = 0; sx < size; sx++)
+                    buf[(row * size + sy) * pw + col * size + sx] = pix;
+        }
+    }
+
+    if (x >= 0 && y >= 0 && x + pw <= lcd_width && y + ph <= lcd_height)
+        esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + pw, y + ph, buf);
+
+    free(buf);
+}
+
 void gfx_draw_char(int x, int y, char c, uint16_t color, uint16_t bg, int size)
 {
     if (c < 32 || c > 126) c = '?';
     const uint8_t *glyph = &font5x7[(c - 32) * 5];
-    
-    for (int col = 0; col < 5; col++) {
-        uint8_t line = glyph[col];
-        for (int row = 0; row < 7; row++) {
-            uint16_t pixel_color = (line & (1 << row)) ? color : bg;
-            if (size == 1) {
-                gfx_draw_pixel(x + col, y + row, pixel_color);
-            } else {
-                gfx_fill_rect(x + col * size, y + row * size, size, size, pixel_color);
-            }
-        }
-    }
-    // Пробел между символами
-    for (int row = 0; row < 7 * size; row++) {
-        if (size == 1) {
-            gfx_draw_pixel(x + 5, y + row, bg);
-        }
-    }
-}
+    int pw = 5 * size;
+    int ph = 7 * size;
 
-void gfx_draw_char_utf8(int x, int y, uint32_t codepoint, uint16_t color, uint16_t bg, int size)
-{
-    const uint8_t *glyph = get_glyph(codepoint);
-    
+    uint16_t *buf = heap_caps_malloc(pw * ph * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!buf) return;
+
     for (int col = 0; col < 5; col++) {
-        uint8_t line = glyph[col];
+        uint8_t bits = glyph[col];
         for (int row = 0; row < 7; row++) {
-            uint16_t pixel_color = (line & (1 << row)) ? color : bg;
-            if (size == 1) {
-                gfx_draw_pixel(x + col, y + row, pixel_color);
-            } else {
-                gfx_fill_rect(x + col * size, y + row * size, size, size, pixel_color);
-            }
+            uint16_t pix = (bits & (1 << row)) ? color : bg;
+            for (int sy = 0; sy < size; sy++)
+                for (int sx = 0; sx < size; sx++)
+                    buf[(row * size + sy) * pw + col * size + sx] = pix;
         }
     }
+
+    if (x >= 0 && y >= 0 && x + pw <= lcd_width && y + ph <= lcd_height)
+        esp_lcd_panel_draw_bitmap(lcd_panel, x, y, x + pw, y + ph, buf);
+
+    free(buf);
 }
 
 void gfx_draw_string(int x, int y, const char *str, uint16_t color, uint16_t bg, int size)
