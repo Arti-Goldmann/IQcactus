@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(py -3 img2rle565.py pixelart/kaktus_piskel/sprite_kaktus_daytime1.png pixelart/kaktus_piskel/sprite_kaktus_daytime2.png pixelart/kaktus_piskel/sprite_kaktus_daytime3.png pixelart/kaktus_piskel/sprite_kaktus_night1.png pixelart/kaktus_piskel/sprite_kaktus_night2.png pixelart/kaktus_piskel/sprite_kaktus_raindrops1.png pixelart/kaktus_piskel/sprite_kaktus_raindrops2.png -o include/sprites/)",
-      "Bash(del \"D:\\\\DATA\\\\Documents\\\\GitRep\\\\MyRep\\\\hardware\\\\cactus\\\\software_m5stick\\\\include\\\\kaktus.h\")"
+      "Bash(del \"D:\\\\DATA\\\\Documents\\\\GitRep\\\\MyRep\\\\hardware\\\\cactus\\\\software_m5stick\\\\include\\\\kaktus.h\")",
+      "Bash(py -3 img2rle565.py pixelart/kaktus_piskel/raindrop.png -W 14 -H 14 -o include/sprites/sprite_drop.h)",
+      "Bash(py -3 img2rle565.py pixelart/kaktus_piskel/raindrop.png -W 14 -H 14 --replace-bg 0,0,0 -o include/sprites/sprite_drop_night.h)",
+      "Bash(py -3 img2rle565.py pixelart/kaktus_piskel/raindrop.png -W 14 -H 14 --replace-bg 0,0,0 -n raindrop_night -o include/sprites/sprite_drop_night.h)"
     ]
   }
 }

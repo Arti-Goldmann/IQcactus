@@ -15,6 +15,7 @@
 // }
 #include "app_state.h"
 #include "config.h"
+#include "server_cert.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -22,7 +23,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_http_client.h"
-#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "cJSON.h"
@@ -94,11 +94,11 @@ void server_task(void *arg)
     char body[128];
 
     esp_http_client_config_t cfg = {
-        .url             = SERVER_URL,
-        .method          = HTTP_METHOD_POST,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler   = http_event_handler,
-        .timeout_ms      = 10000,
+        .url           = SERVER_URL,
+        .method        = HTTP_METHOD_POST,
+        .event_handler = http_event_handler,
+        .timeout_ms    = 10000,
+        .cert_pem      = SERVER_CERT_PEM,
     };
 
     while (1) {

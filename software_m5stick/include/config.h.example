@@ -3,6 +3,9 @@
 
 #pragma once
 
+// Часовой пояс (POSIX-формат: UTC±смещение, например "UTC-3" для Москвы)
+#define TIMEZONE      "UTC-3"
+
 // Wi-Fi
 #define WIFI_SSID     "your_ssid"
 #define WIFI_PASS     "your_password"

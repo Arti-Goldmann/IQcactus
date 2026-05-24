@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Подключиться к Wi-Fi (блокирует до получения IP или таймаута).
 // Возвращает true при успехе.

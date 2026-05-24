@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -192,10 +193,20 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, MOISTURE_ADC_CHANNEL, &adc_chan_cfg));
 
+    // Часовой пояс — до SNTP, чтобы localtime() сразу работал правильно
+    setenv("TZ", TIMEZONE, 1);
+    tzset();
+
     // Wi-Fi + SNTP
     if (wifi_connect()) {
         sntp_sync_start();
-        sntp_wait_sync(10000);
+        if (sntp_wait_sync(10000)) {
+            // Отсчёт интервала полива начинается с момента загрузки,
+            // чтобы автополив не сработал сразу после старта.
+            STATE_LOCK();
+            g_state.last_watered_s = (int64_t)time(NULL);
+            STATE_UNLOCK();
+        }
     } else {
         ESP_LOGW(TAG, "Wi-Fi failed, continuing without time sync");
     }
@@ -207,8 +218,10 @@ void app_main(void)
 
     // Главный цикл: кнопки + влажность
     int prev_btn_a = 1, prev_btn_b = 1;
-    int out_g26 = 0, out_g25 = 0;
+    int out_g26 = 0;
     TickType_t last_a = 0, last_b = 0, last_moisture = 0;
+    TickType_t pump_start_tick    = 0;
+    TickType_t pump_duration_tick = 0;  // 0 = ручной таймер не активен
 
     while (1) {
         TickType_t now = xTaskGetTickCount();
@@ -216,7 +229,7 @@ void app_main(void)
         int btn_a = gpio_get_level(BTN_A_PIN);
         int btn_b = gpio_get_level(BTN_B_PIN);
 
-        // BTN_A → свет (G26)
+        // BTN_A → свет (G26), toggle
         if (prev_btn_a == 1 && btn_a == 0 &&
             (now - last_a) >= pdMS_TO_TICKS(DEBOUNCE_MS)) {
             last_a = now;
@@ -228,16 +241,31 @@ void app_main(void)
             ESP_LOGI(TAG, "light: %d", out_g26);
         }
 
-        // BTN_B → насос (G25)
+        // BTN_B → ручной полив: включить насос на pump_duration_s секунд
         if (prev_btn_b == 1 && btn_b == 0 &&
             (now - last_b) >= pdMS_TO_TICKS(DEBOUNCE_MS)) {
             last_b = now;
-            out_g25 = !out_g25;
-            gpio_set_level(OUT_G25, out_g25);
             STATE_LOCK();
-            g_state.pump_on = out_g25;
+            int dur = g_state.pump_duration_s;
             STATE_UNLOCK();
-            ESP_LOGI(TAG, "pump: %d", out_g25);
+            gpio_set_level(OUT_G25, 1);
+            pump_start_tick    = now;
+            pump_duration_tick = pdMS_TO_TICKS((uint32_t)dur * 1000);
+            STATE_LOCK();
+            g_state.pump_on = true;
+            STATE_UNLOCK();
+            ESP_LOGI(TAG, "pump: manual start, %ds", dur);
+        }
+
+        // Авто-остановка ручного полива по истечении таймера
+        if (pump_duration_tick > 0 &&
+            (now - pump_start_tick) >= pump_duration_tick) {
+            pump_duration_tick = 0;
+            gpio_set_level(OUT_G25, 0);
+            STATE_LOCK();
+            g_state.pump_on = false;
+            STATE_UNLOCK();
+            ESP_LOGI(TAG, "pump: auto-stop");
         }
 
         prev_btn_a = btn_a;
