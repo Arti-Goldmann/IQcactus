@@ -1,0 +1,18 @@
+// Скопируй этот файл в include/config.h и заполни своими значениями.
+// config.h добавлен в .gitignore — пароли не попадут в репозиторий.
+
+#pragma once
+
+// Wi-Fi
+#define WIFI_SSID     "your_ssid"
+#define WIFI_PASS     "your_password"
+
+// Сервер (HTTPS). Пример: "https://192.168.1.100:8443/api/cactus"
+#define SERVER_URL    "https://example.com/api/cactus"
+#define SERVER_POLL_S 60    // период опроса, секунды
+
+// Уставки полива (переопределяются сервером)
+#define WATER_MODE         0   // 0 = по времени, 1 = по влажности
+#define WATER_INTERVAL_H   48  // минимальный интервал между поливами, часы
+#define WATER_THRESHOLD    30  // порог влажности %, только для режима 1
+#define PUMP_DURATION_S    10  // длительность работы насоса, секунды
